@@ -6,13 +6,12 @@ pydantic==2.5.0
 # Database ORM
 sqlalchemy==2.0.23
 
-# Data Science
-pandas==2.1.4
-numpy==1.26.2
+# Data Science (ИСПРАВЛЕНЫ ВЕРСИИ!)
+pandas==2.2.0
+numpy==1.26.3
 
 # Time Series Forecasting
 prophet==1.1.5
-cmdstanpy==1.2.0
 
 # Security
 passlib[bcrypt]==1.7.4
@@ -24,4 +23,4 @@ openpyxl==3.1.2
 
 # Utilities
 python-dateutil==2.8.2
-pytz==2023.3
+pytz==2024.1
