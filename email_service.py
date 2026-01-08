@@ -31,7 +31,7 @@ async def send_welcome_email(email: str, username: str, store_name: str):
                 
                 <p style="color: #4b5563; font-size: 16px; line-height: 1.6;">
                     Спасибо за регистрацию в системе прогнозирования спроса! 
-                    Ваш магазин <strong style="color: #667eea;">"{store_name}"</strong> успешно добавлен.
+                    Ваша компания<strong style="color: #667eea;">"{store_name}"</strong> успешно добавлена.
                 </p>
                 
                 <div style="background: white; border-left: 4px solid #667eea; padding: 15px; margin: 20px 0;">
