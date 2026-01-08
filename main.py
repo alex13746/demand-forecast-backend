@@ -1,4 +1,4 @@
-# main.py (ИСПРАВЛЕННАЯ ВЕРСИЯ С EMAIL)
+# main.py (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 
 import os
 import re
@@ -9,14 +9,16 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-# ДОБАВЛЕНО: импорты для email
-from fastapi_mail.exceptions import ConnectionErrors, ConnectionPoolErrors
+# ✅ ИСПРАВЛЕННЫЙ ИМПОРТ (убрали .exceptions):
 from email_service import send_welcome_email
 
 from database import engine, get_db, Base
 from models import User, Product, SalesHistory, Forecast
 from utils import verify_password, get_password_hash, save_uploaded_csv
 from forecast_engine import process_sales_and_forecast
+
+# Остальной код без изменений...
+
 
 # Создаем таблицы при запуске
 Base.metadata.create_all(bind=engine)
