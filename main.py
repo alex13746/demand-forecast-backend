@@ -1,12 +1,17 @@
-# main.py (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# main.py (ИСПРАВЛЕННАЯ ВЕРСИЯ С EMAIL)
 
 import os
+import re
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Form
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+
+# ДОБАВЛЕНО: импорты для email
+from fastapi_mail.exceptions import ConnectionErrors, ConnectionPoolErrors
+from email_service import send_welcome_email
 
 from database import engine, get_db, Base
 from models import User, Product, SalesHistory, Forecast
@@ -43,26 +48,43 @@ def get_current_user_id(username: str) -> int:
         )
     return ACTIVE_SESSIONS[username]
 
+def is_valid_email(email: str) -> bool:
+    """Проверка валидности email"""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
 
 # ===== ENDPOINTS =====
 
 @app.post("/register")
-def register(
+async def register(  # ← ДОБАВЛЕНО: async
     username: str = Form(...),
+    email: str = Form(...),  # ← ДОБАВЛЕНО: поле email
     password: str = Form(...),
     store_name: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    """Регистрация нового пользователя."""
-    # Проверяем уникальность
+    """Регистрация нового пользователя с отправкой приветственного email"""
+    
+    # Валидация email
+    if not is_valid_email(email):
+        raise HTTPException(status_code=400, detail="Некорректный формат email")
+    
+    # Проверяем уникальность username
     db_user = db.query(User).filter(User.username == username).first()
     if db_user:
-        raise HTTPException(status_code=400, detail="Пользователь уже существует")
+        raise HTTPException(status_code=400, detail="Пользователь с таким именем уже существует")
+    
+    # Проверяем уникальность email
+    db_email = db.query(User).filter(User.email == email).first()
+    if db_email:
+        raise HTTPException(status_code=400, detail="Email уже зарегистрирован")
     
     # Создаем нового пользователя
     hashed_pw = get_password_hash(password)
     new_user = User(
         username=username,
+        email=email,  # ← ДОБАВЛЕНО
         password_hash=hashed_pw,
         store_name=store_name,
         created_at=datetime.utcnow()
@@ -71,10 +93,20 @@ def register(
     db.commit()
     db.refresh(new_user)
     
+    # Отправка приветственного email (не блокируем ответ)
+    try:
+        await send_welcome_email(email, username, store_name)
+    except (ConnectionErrors, ConnectionPoolErrors) as e:
+        print(f"⚠️ Ошибка отправки email: {e}")
+        # Регистрация всё равно успешна
+    except Exception as e:
+        print(f"❌ Неожиданная ошибка email: {e}")
+    
     return {
         "user_id": new_user.id,
-        "message": "Успешно зарегистрированы",
-        "username": username
+        "message": "✅ Регистрация успешна! Проверьте email для подтверждения.",
+        "username": username,
+        "store_name": store_name
     }
 
 
