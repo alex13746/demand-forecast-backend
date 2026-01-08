@@ -95,14 +95,13 @@ async def register(  # ← ДОБАВЛЕНО: async
     db.commit()
     db.refresh(new_user)
     
-    # Отправка приветственного email (не блокируем ответ)
+       # Отправка приветственного email (не блокируем ответ)
     try:
         await send_welcome_email(email, username, store_name)
-    except (ConnectionErrors, ConnectionPoolErrors) as e:
+    except Exception as e:
         print(f"⚠️ Ошибка отправки email: {e}")
         # Регистрация всё равно успешна
-    except Exception as e:
-        print(f"❌ Неожиданная ошибка email: {e}")
+
     
     return {
         "user_id": new_user.id,
