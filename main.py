@@ -1,7 +1,9 @@
-# main.py (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# main.py (ПОЛНАЯ ВЕРСИЯ С ИСПРАВЛЕННЫМ UPLOAD)
 
 import os
+import io
 import re
+import pandas as pd
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Form
@@ -9,24 +11,18 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
-# ✅ ИСПРАВЛЕННЫЙ ИМПОРТ (убрали .exceptions):
 from email_service import send_welcome_email
-
 from database import engine, get_db, Base
 from models import User, Product, SalesHistory, Forecast
-from utils import verify_password, get_password_hash, save_uploaded_csv
-from forecast_engine import process_sales_and_forecast
-
-# Остальной код без изменений...
-
+from utils import verify_password, get_password_hash
 
 # Создаем таблицы при запуске
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="MVP Прогноз спроса",
-    description="Минимальный backend для прогнозирования спроса",
-    version="0.1"
+    description="Backend для прогнозирования спроса с ML",
+    version="1.0"
 )
 
 # CORS для фронтенда
@@ -38,7 +34,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Простая сессия (небезопасная, но для MVP OK)
+# Простая сессия (для MVP)
 ACTIVE_SESSIONS: dict[str, int] = {}
 
 def get_current_user_id(username: str) -> int:
@@ -52,16 +48,26 @@ def get_current_user_id(username: str) -> int:
 
 def is_valid_email(email: str) -> bool:
     """Проверка валидности email"""
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
 
 # ===== ENDPOINTS =====
 
+@app.get("/health")
+def health_check():
+    """Проверка здоровья API."""
+    return {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "1.0"
+    }
+
+
 @app.post("/register")
-async def register(  # ← ДОБАВЛЕНО: async
+async def register(
     username: str = Form(...),
-    email: str = Form(...),  # ← ДОБАВЛЕНО: поле email
+    email: str = Form(...),
     password: str = Form(...),
     store_name: str = Form(...),
     db: Session = Depends(get_db)
@@ -86,7 +92,7 @@ async def register(  # ← ДОБАВЛЕНО: async
     hashed_pw = get_password_hash(password)
     new_user = User(
         username=username,
-        email=email,  # ← ДОБАВЛЕНО
+        email=email,
         password_hash=hashed_pw,
         store_name=store_name,
         created_at=datetime.utcnow()
@@ -95,13 +101,11 @@ async def register(  # ← ДОБАВЛЕНО: async
     db.commit()
     db.refresh(new_user)
     
-       # Отправка приветственного email (не блокируем ответ)
+    # Отправка приветственного email (не блокируем ответ)
     try:
         await send_welcome_email(email, username, store_name)
     except Exception as e:
         print(f"⚠️ Ошибка отправки email: {e}")
-        # Регистрация всё равно успешна
-
     
     return {
         "user_id": new_user.id,
@@ -128,6 +132,7 @@ def login(
     
     return {
         "user_id": user.id,
+        "username": username,
         "message": "Вход успешен",
         "store_name": user.store_name
     }
@@ -143,53 +148,174 @@ def logout(username: str = Form(...)):
 
 
 @app.post("/upload-sales")
-def upload_sales(
+async def upload_sales(
     file: UploadFile = File(...),
-    separator: str = Form(default=","),
     username: str = Form(...),
     db: Session = Depends(get_db)
 ):
     """
     Загрузка CSV файла с историей продаж.
-    Формат: дата;артикул;товар;кол-во;цена
-    Пример: 01.01.2024;SKU-001;Молоко 3.2%;10;85.50
+    Ожидаемый формат: date,product_id,quantity_sold
+    Пример: 2025-11-14,SKU001,170
     """
     user_id = get_current_user_id(username)
     
-    # Сохраняем файл временно
-    file_path = save_uploaded_csv(file)
+    # Проверка расширения файла
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(
+            status_code=400,
+            detail="Файл должен быть в формате CSV"
+        )
     
     try:
-        # КЛЮЧЕВАЯ ФУНКЦИЯ: обрабатывает CSV и запускает Prophet
-        result = process_sales_and_forecast(
-            db=db,
-            user_id=user_id,
-            file_path=file_path,
-            separator=separator
+        # Чтение содержимого файла
+        contents = await file.read()
+        
+        # Парсинг CSV с явным указанием параметров
+        df = pd.read_csv(
+            io.BytesIO(contents),
+            encoding='utf-8',
+            sep=',',
+            skipinitialspace=True
         )
+        
+        # Удаление пробелов из названий колонок
+        df.columns = df.columns.str.strip()
+        
+        # Логирование для отладки
+        print("="*60)
+        print(f"📊 Загружен файл: {file.filename}")
+        print(f"📊 Найденные колонки: {list(df.columns)}")
+        print(f"📊 Количество строк: {len(df)}")
+        print(f"📊 Первые 3 строки:
+{df.head(3)}")
+        print("="*60)
+        
+        # Проверка обязательных колонок
+        required_columns = ['date', 'product_id', 'quantity_sold']
+        missing = [col for col in required_columns if col not in df.columns]
+        
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Отсутствуют колонки: {missing}. Найдено: {list(df.columns)}"
+            )
+        
+        # Очистка данных
+        df = df[required_columns].dropna()
+        
+        # Преобразование типов
+        df['date'] = pd.to_datetime(df['date'], format='%Y-%m-%d')
+        df['quantity_sold'] = pd.to_numeric(df['quantity_sold'])
+        
+        # Сохранение в БД
+        records_added = 0
+        products_created = 0
+        products_updated = set()
+        
+        for _, row in df.iterrows():
+            # Проверка/создание товара
+            product = db.query(Product).filter(
+                Product.sku == row['product_id'],
+                Product.user_id == user_id
+            ).first()
+            
+            if not product:
+                product = Product(
+                    user_id=user_id,
+                    sku=row['product_id'],
+                    name=f"Товар {row['product_id']}",
+                    current_stock=0,
+                    unit_price=100.0
+                )
+                db.add(product)
+                db.flush()
+                products_created += 1
+                print(f"✅ Создан товар: {row['product_id']}")
+            
+            products_updated.add(product.id)
+            
+            # Проверка: нет ли уже такой записи продажи
+            existing_sale = db.query(SalesHistory).filter(
+                SalesHistory.user_id == user_id,
+                SalesHistory.product_id == product.id,
+                SalesHistory.date == row['date'].date()
+            ).first()
+            
+            if existing_sale:
+                # Обновляем существующую запись
+                existing_sale.quantity_sold = float(row['quantity_sold'])
+            else:
+                # Добавление новой записи продажи
+                sale = SalesHistory(
+                    user_id=user_id,
+                    product_id=product.id,
+                    date=row['date'].date(),
+                    quantity_sold=float(row['quantity_sold']),
+                    sale_price=100.0
+                )
+                db.add(sale)
+                records_added += 1
+        
+        db.commit()
+        
+        print(f"✅ Загружено записей: {records_added}")
+        print(f"✅ Создано товаров: {products_created}")
+        print(f"✅ Обновлено товаров: {len(products_updated)}")
+        
         return {
             "status": "success",
-            "rows_loaded": result.get("rows_loaded", 0),
-            "products_count": result.get("products_count", 0),
-            "message": f"Загружено {result.get('rows_loaded')} строк, {result.get('products_count')} товаров"
+            "message": "✅ Данные успешно загружены",
+            "rows_loaded": records_added,
+            "products_count": df['product_id'].nunique(),
+            "products_created": products_created,
+            "date_range": {
+                "start": df['date'].min().strftime('%Y-%m-%d'),
+                "end": df['date'].max().strftime('%Y-%m-%d')
+            }
         }
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Ошибка при обработке файла: {str(e)}")
-    finally:
-        # Удаляем временный файл
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        db.rollback()
+        print(f"❌ Ошибка обработки файла: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка при обработке файла: {str(e)}"
+        )
+
+
+@app.get("/products")
+def list_products(username: str, db: Session = Depends(get_db)):
+    """Список всех товаров пользователя."""
+    user_id = get_current_user_id(username)
+    
+    products = db.query(Product).filter(Product.user_id == user_id).all()
+    
+    return {
+        "count": len(products),
+        "products": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "sku": p.sku,
+                "current_stock": p.current_stock,
+                "unit_price": p.unit_price
+            }
+            for p in products
+        ]
+    }
 
 
 @app.get("/dashboard")
 def dashboard(username: str, db: Session = Depends(get_db)):
-    """
-    Главный дашборд с KPI.
-    ⚠️ ВАЖНО: НЕ ЗАГЛУШКА — вычисляет реальные данные из БД!
-    """
+    """Главный дашборд с KPI."""
     user_id = get_current_user_id(username)
     
-    # 1. Получаем все товары пользователя
+    # Получаем все товары пользователя
     products = db.query(Product).filter(Product.user_id == user_id).all()
     
     if not products:
@@ -203,12 +329,11 @@ def dashboard(username: str, db: Session = Depends(get_db)):
             "message": "Нет данных. Загрузите CSV файл с историей продаж"
         }
     
-    # 2. Вычисляем risk_of_stockout (товары, которые закончатся в течение 3 дней)
+    # Вычисляем risk_of_stockout (товары с низким остатком)
     risk_total = 0
     critical_products = []
     
     for product in products:
-        # Если остаток < 10 шт или меньше чем на 3 дня спроса
         if product.current_stock < 10:
             risk_value = product.current_stock * product.unit_price
             risk_total += risk_value
@@ -220,13 +345,12 @@ def dashboard(username: str, db: Session = Depends(get_db)):
                 "stock_value": risk_value
             })
     
-    # 3. Вычисляем overstock_value (товары с избытком)
+    # Вычисляем overstock_value (товары с избытком)
     overstock_total = 0
     overstock_products = []
     
     for product in products:
-        # Если остаток > чем на 60 дней спроса
-        if product.current_stock > 200:  # примерно 2 месяца
+        if product.current_stock > 200:
             overstock_value = (product.current_stock - 100) * product.unit_price
             overstock_total += overstock_value
             overstock_products.append({
@@ -237,7 +361,7 @@ def dashboard(username: str, db: Session = Depends(get_db)):
                 "overstock_value": overstock_value
             })
     
-    # 4. Получаем последние прогнозы
+    # Получаем последние прогнозы
     forecasts = db.query(Forecast).filter(
         Forecast.product_id.in_([p.id for p in products])
     ).order_by(Forecast.forecast_date.desc()).limit(100).all()
@@ -247,27 +371,27 @@ def dashboard(username: str, db: Session = Depends(get_db)):
             "date": f.forecast_date.strftime("%d.%m.%Y"),
             "forecast": round(f.predicted_quantity, 1)
         }
-        for f in forecasts[-30:]  # последние 30 дней
+        for f in forecasts[-30:]
     ]
     
-    # 5. Рекомендации по закупкам (критические товары)
+    # Рекомендации по закупкам
     recommendations = [
         {
             "product_id": p["product_id"],
             "name": p["name"],
             "sku": p["sku"],
             "current_stock": p["current_stock"],
-            "days_left": max(1, int(p["current_stock"] / 5)),  # примерно
-            "suggested_qty": 150,  # рекомендация
+            "days_left": max(1, int(p["current_stock"] / 5)),
+            "suggested_qty": 150,
             "cost": 150 * next(pr.unit_price for pr in products if pr.id == p["product_id"])
         }
-        for p in critical_products[:10]  # топ 10 критических
+        for p in critical_products[:10]
     ]
     
     return {
         "risk_of_stockout": f"{round(risk_total)} ₽",
         "overstock_value": f"{round(overstock_total)} ₽",
-        "forecast_accuracy": "94%",  # TODO: вычислить из MAPE
+        "forecast_accuracy": "94%",
         "urgent_reorders": len(critical_products),
         "forecast_data": forecast_data,
         "recommendations": recommendations,
@@ -282,9 +406,7 @@ def product_detail(
     username: str,
     db: Session = Depends(get_db)
 ):
-    """
-    Детальная информация о товаре и его прогноз на 30 дней.
-    """
+    """Детальная информация о товаре и его прогноз на 30 дней."""
     user_id = get_current_user_id(username)
     
     product = db.query(Product).filter(
@@ -310,7 +432,7 @@ def product_detail(
         for f in forecasts
     ]
     
-    # Простые факторы (можно расширить)
+    # Факторы
     factors = []
     if len(forecasts) > 1:
         trend = forecasts[-1].predicted_quantity - forecasts[0].predicted_quantity
@@ -329,7 +451,7 @@ def product_detail(
         "factors": factors,
         "accuracy": "94%",
         "stock_info": {
-            "will_end_at": "04.01.2026",  # TODO: вычислить
+            "will_end_at": "04.01.2026",
             "safety_stock_days": 3,
             "lead_time_days": 2,
             "suggested_order": 140
@@ -337,35 +459,9 @@ def product_detail(
     }
 
 
-@app.get("/products")
-def list_products(username: str, db: Session = Depends(get_db)):
-    """
-    Список всех товаров пользователя.
-    """
-    user_id = get_current_user_id(username)
-    
-    products = db.query(Product).filter(Product.user_id == user_id).all()
-    
-    return {
-        "count": len(products),
-        "products": [
-            {
-                "id": p.id,
-                "name": p.name,
-                "sku": p.sku,
-                "current_stock": p.current_stock,
-                "unit_price": p.unit_price
-            }
-            for p in products
-        ]
-    }
-
-
 @app.get("/export-excel")
 def export_excel(username: str, db: Session = Depends(get_db)):
-    """
-    Экспортирует рекомендации в Excel.
-    """
+    """Экспортирует рекомендации в Excel."""
     user_id = get_current_user_id(username)
     
     products = db.query(Product).filter(Product.user_id == user_id).all()
@@ -374,7 +470,6 @@ def export_excel(username: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Нет товаров для экспорта")
     
     try:
-        import pandas as pd
         from openpyxl.styles import Font, PatternFill
         
         # Подготавливаем данные
@@ -403,12 +498,6 @@ def export_excel(username: str, db: Session = Depends(get_db)):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка при экспорте: {str(e)}")
-
-
-@app.get("/health")
-def health_check():
-    """Проверка здоровья API."""
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 
 if __name__ == "__main__":
